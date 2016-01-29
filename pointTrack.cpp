@@ -7,6 +7,16 @@
 
 using namespace cv;
 
+#define MAX_COUNT 300
+#define QUALITY 0.01
+#define MIN_DIST 3
+
+#define templateXSize 15//115//55//49
+#define templateYSize 15//115//55//49
+
+#define searchXSize 39//185//89
+#define searchYSize 39//125//89
+
 volatile int quit_signal=0;
 #ifdef __unix__
 #include <signal.h>
@@ -19,6 +29,7 @@ extern "C" void quit_signal_handler(int signum) {
 
 int main(int argc, char** argv){
 	namedWindow("Video",WINDOW_NORMAL);
+	namedWindow("VideoLapse",WINDOW_NORMAL);
 	
 	VideoCapture cap(argv[1]); // open the default camera
 	if(!cap.isOpened()){ // check if we succeeded
@@ -27,5 +38,97 @@ int main(int argc, char** argv){
 	#ifdef __unix__
 	   signal(SIGINT,quit_signal_handler); // listen for ctrl-C
 	#endif
+
+	Mat currentFrame;
+	Mat lastFrame;
+	
+	Size winSize(10,10);
+	TermCriteria termcrit(CV_TERMCRIT_ITER|CV_TERMCRIT_EPS,30,0.1);
+	vector<Point2f> points[2];  // Index 0 = last image, index 1 = this image. 
+	vector<Point2f> frames[5];  // Index 0 = last image, index 1 = this image. 
+	
+	for (;;){
+		if (!currentFrame.empty() ){
+			lastFrame = currentFrame.clone();
+		}
+		cap >> currentFrame;
+		
+		if (currentFrame.empty() )
+			exit(0);
+		if (quit_signal) exit(0);
+		
+		Mat out, currentGray, lastGray;
+		cvtColor(currentFrame, currentGray, CV_BGR2GRAY);
+		if (!lastFrame.empty() ){
+			cvtColor(lastFrame, lastGray, CV_BGR2GRAY);
+			absdiff(lastGray, currentGray, out);
+		
+			std::cout << "Points is " << points[0].size() << std::endl;
+			for (int p = 0; p < points[0].size(); p++){
+				circle(lastFrame,points[0][p],3,cv::Scalar(0,255,0),1);
+			}
+			imshow("VideoLapse", lastFrame);
+			
+			int width = currentFrame.cols;
+			int height = currentFrame.rows;
+			
+			for (int k = 0; k < points[0].size(); k++){
+				// Get the corners for the template and the search area, and fix for edge cases. 
+				int xTempCorner = std::max( (int)points[0][k].x - templateXSize/2, 0);
+				int yTempCorner = std::max( (int)points[0][k].y - templateYSize/2, 0);
+				int xSearchCorner = std::max( (int)points[0][k].x - searchXSize/2, 0);
+				int ySearchCorner = std::max( (int)points[0][k].y - searchYSize/2, 0);
+
+				// Same for width of the ROIs. 
+				int templateWidth = std::min(templateXSize, width - xTempCorner);
+				int templateHeight = std::min(templateYSize, height - yTempCorner);
+				int searchWidth = std::min(searchXSize, width - xSearchCorner);
+				int searchHeight = std::min(searchYSize, height - ySearchCorner);
+			
+				if (!templateWidth || !templateHeight || !searchWidth || !searchHeight){
+					continue;
+	
+				Mat templateImg(lastFrame, Rect(xTempCorner, yTempCorner, templateWidth, templateHeight) );  // Smaller
+				Mat comparison(currentFrame, Rect(xSearchCorner, ySearchCorner , searchWidth, searchHeight) ); 
+			
+
+				// Formulate the result matrix, which is the size of the difference of the 2 mats + 1. This holds
+				// the result of the convolutions.
+				int rCols = comparison.cols - templateImg.cols + 1; // This is key... 9x9 total size of result.
+				int rRows = comparison.rows - templateImg.rows + 1;
+				Mat result = Mat(rRows, rCols, CV_8UC3);
+
+				// Match the template
+				matchTemplate(comparison, templateImg, result, CV_TM_SQDIFF_NORMED);//CV_TM_CCORR);
+				normalize( result, result, 0, 1, NORM_MINMAX, -1, Mat() );
+
+				// Then get the point in the results that best fits.
+				Point minLoc, maxLoc;
+				double minVal, maxVal;
+				// Finds the index of the max and min values. For CV_TM_SQDIFF, best match is at minLoc. 
+				minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc);
+				Point matchLoc = minLoc;  // This will be a location within the bigger Mat,
+											// i.e. in the comparison rectangle. Has to be. 
+
+				// After doing some working it out on paper, I came up with this as the correct algorithm for figuring out
+				// where the corresponding point is in the larger image. The result vector's top left point is (searchCols - tempCols)/2 from the 
+				// left of the search field, similar for y, and then add in the search field's x and y. 
+				matchLoc.x = xSearchCorner + matchLoc.x + (searchWidth - rCols) / 2;  // Add value to x and y to get a translation vector. 
+				matchLoc.y = ySearchCorner + matchLoc.y + (searchHeight - rRows) / 2; 
+				// Push it back into points[1], which will eventually be used to populate the points to track for the next iteration .
+				points[1].push_back(matchLoc);
+				}
+				std::cout << "Points 1 size is " << points[1].size() << std::endl;
+				swap(points[1], points[0]);
+			}
+		}else{
+			cvtColor(currentFrame, currentGray, CV_BGR2GRAY);
+			goodFeaturesToTrack(currentGray, points[0], MAX_COUNT, 0.01, MIN_DIST, Mat(), 5, 0, 0.04); // Get a field of 500 features to track
+			cornerSubPix(currentGray, points[0], winSize, Size(-1, -1), termcrit);		
+		}
+		
+		imshow("Video", currentFrame);
+		waitKey(20);
+	}
 
 }
